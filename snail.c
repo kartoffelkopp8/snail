@@ -177,55 +177,31 @@ int getConnSock() {
 // takes allocated buffer, reads in a line from filepointer and returns position
 // of last char: \0
 int readP(char **buffer, FILE *rs, int *size) {
+  int ch;
   char c;
   int pos = 0;
-  char *line = *buffer;
 
-  if (!line) {
-    return -1;
+  if ((*buffer) == NULL) {
+    *size = BUFFERSIZE;
+    if ((((*buffer)) = malloc(*size)) == NULL) {
+      perror("malloc");
+      return -1;
+    }
   }
 
   // on error return EOF or if sock is closed
-  /**
-   * PS: ACHTUNG: Dieser Check wird niemals false. Hier passiert etwas sehr gemeines.
-   * Der Zuweisungsoperator in C ist so definiert:
-   * 1. Der R-Wert (Wert rechts des =) wird in falls nötig in den Typ des L-Werts (Variable) umgewandelt. Hier int -> char.
-   * 2. Der R-Wert wird dem L-Wert (der Variablen) zugewiesen.
-   * 3. Der Zuweisungsoperator liefert das Ergebnis des R-Werts (hier (char) fgetc(rs)) zurück.
-   *
-   * Das Problem hier ist, char ein 8 bit Datentyp ist und int meist! ein 32 bit Datentyp.
-   * EOF == -1 entspricht im Zweierkomplement der 32 bit Darstellung 0xffffffff.
-   * Selbst wenn EOF (-1) zurückgegeben wird, wird das durch den Cast zu char zu einem 8 bit Datentyp -> 0xff.
-   *
-   * Der Compiler könnte das bereits vorhersehen.
-   * Aber weil wir hier in C sind macht er das natürlich nicht, sondern setzt alles genauso um wie es dasteht mit allen Konsequenzen.
-   * In Java würde diese Zuweisung übrigens einen expliziten Cast erfordern.
-   */
-  while ((c = fgetc(rs)) != EOF) {
+  while ((ch = fgetc(rs)) != EOF) {
+    c = (char)ch;
+
     if (pos >= *size - 1) {
       *size += BUFFERSIZE;
-	  /**
-	   * PS: ACHTUNG: Das hier kann zu einem riesen Problem führen!
-	   * Sobald dieses realloc() einmal ausgeführt wurde ist der Speicher von außen über buffer nicht mehr erreichbar.
-	   * Schlimmer noch: Ein Zugriff auf *buffer von außen ist sogar ungültig.
-	   *
-	   * realloc() vergrößert den Speicher und schreibt den neuen pointer zum Stringanfang in line.
-	   * In *buffer steht aber immer noch der Pointer zum alten Stringanfang!
-	   * Dieser wurde gerade durch realloc() aber freigegeben.
-	   *
-	   * Das hier kann nur durch Zufall funktionieren, wenn:
-	   * a) realloc() nie aufgerufen wird
-	   * b) für denn vergrößerten Speicher zufällig der gleiche Speicherort wie für *buffer verwenden wird (nach MAN page explizit möglich).
-	   *
-	   * Insgesamt ist das hier aber undefined behaviour.
-	   */
-      if ((line = realloc(line, *size)) == NULL) {
+      if (((*buffer) = realloc((*buffer), (*size))) == NULL) {
         perror("realloc");
         return -1;
       }
     }
 
-    line[pos++] = c;
+    (*buffer)[pos++] = c;
     if (c == '\n') {
       break;
     }
@@ -235,7 +211,7 @@ int readP(char **buffer, FILE *rs, int *size) {
     return -1;
   }
 
-  line[pos] = '\0'; // null terminate string
+  (*buffer)[pos] = '\0'; // null terminate string
   return pos;
 }
 
@@ -298,11 +274,7 @@ char **createHeader(char *fqdn, char *sMail, const char *eMail, char *name) {
   info[2] = malloc(TOlen);
   info[3] = strdup(data);
   info[4] = malloc(Headlen);
-  /**
-   * PS: ACHTUNG info[4] wird nicht überprüft!!
-   * da 4 < 4 == false
-   */
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     if (info[i] == NULL) {
       perror("malloc");
       return NULL;
@@ -331,11 +303,7 @@ void freeHeader(char **header) {
     return;
   }
 
-  /**
-   * PS: ACHTUNG:
-   * Hier wird auch header[4] nicht freigegeben, da 4 < 4 == false.
-   */
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     free(header[i]);
   }
   free(header);
@@ -424,134 +392,104 @@ RETURN checkSendHeader(char *fqdn, char *sMail, char *eMail, char *name,
 }
 
 /**
- * Write email body to the server, ensuring SMTP compliance
- * @param ws: Write stream to the server
- * @param rs: Read stream from the server
- * @return: -1 if error occurs, 0 on success
+ * Reads a message from standard input (stdin) until a single period ('.')
+ * followed by \r\n or just \n is detected. The read text is stored in a
+ * dynamically allocated buffer.
+ *
+ * @return A pointer to the read text or NULL in case of an error.
  */
-int writeTo(FILE *ws, FILE *rs) {
-  char c;       // Current character being read
-  char next;    // Next character after a period to check for the end-of-message
-                // marker
-  char *answer; // Buffer to store the server’s response
-  int size;     // Size of the server's response
+char *readBody() {
+  int size = BUFFERSIZE;           // Initial size of the buffer
+  int pos = 0;                     // Current position in the buffer
+  int ch;                          // Variable for the current character
+  char *body = malloc(BUFFERSIZE); // Allocate memory for the buffer
 
-  // Loop to read and write each character in the message
-  /**
-   * PS: Die Ifs in der Schleife sind sehr undurchsichtig und kompliziert. Hier können leicht Fehler passieren.
-   * Hier passiert sehr viel auf einmal. Das würde ich etwas aufteilen:
-   * 1. Die gesamte Nachricht vom stdin bis EOF einlesen und in einen String speichern (logischerweise dynamisch allokiert).
-   * 2. Eine encoding-Funktion schreiben, die Punkte am Zeilenanfang escaped und sicherstellt, dass die Zeilenumbrüche alle \r\n sind.
-   *    Dafür muss natürlich ein neuer String angelegt werden.
-   * 3. Anschließend kannst du ganz einfach den kodierten String mit fputs() oder ähnlichem versenden.
-   *
-   * Das würde den Code hier etwas entzerren und weniger fehleranfällig machen.
-   */
-  while ((c = fgetc(stdin)) != EOF) {
-    // Check if the current character is a period ('.')
-    if (c == '.') {
-      // Read the next character after the period
-      if ((next = fgetc(stdin)) == EOF) {
-        // Handle any read error
-        if (ferror(stdin)) {
-          perror("fgetc");
-          return -1;
-        }
-      }
+  // Check if the memory was successfully allocated
+  if (body == NULL) {
+    perror("malloc"); // Print an error message if malloc fails
+    return NULL;      // Return NULL in case of an error
+  }
 
-      // If the next character is not '\r' or '\n'
-      if (next != '\r' && next != '\n') {
-        // Write two periods to "escape" the single period in the message
-        if ((fputc('.', ws) == EOF) || (fputc('.', ws) == EOF)) {
-          if (ferror(ws)) { // Check for any write errors
-            perror("fputc");
-            return -1;
-          }
-        }
-        ungetc(next, stdin); // Put the character back in the input stream
+  // Loop to read characters until EOF
+  while ((ch = fgetc(stdin)) != EOF) {
 
-      }
-      // If the next character is '\r' or '\n', it indicates the end of the
-      // message
-	  /**
-	   * PS: ACHTUNG: Die Aufgabenstellung sagt nicht, das der Nutzer mit "\r\n.\r\n" die Nachricht beenden soll.
-	   * Der Nutzer soll lediglich Text über die Standardeingabe eingeben und den Text mit CTRL+D (EOF) beenden.
-	   * CTRL+D sorgt dafür, dass im Stream EOF gelesen wird, wodurch das Lesen abbricht.
-	   *
-	   * Selbst wenn der benutzer \r\n.\r\n eingeben würde, müsste das Programm den Punkt durch einen zweiten escapen
-	   * -> \r\n..\r\n
-	   *
-	   * Dieser Check hier ist also falsch.
-	   *
-	   * Ganz davon abgesehen, ist die If-Bedingung hier immer true.
-	   */
-      else if (next == '\r' || next == '\n') {
-        fprintf(stderr, "test");
-        // Write the period and line break to signal the end of the message
-        if (fputs(".\r\n", ws) == EOF) {
-          if (ferror(ws)) { // Check for any write errors
-            perror("fputs 318");
-            return -1;
-          }
-          break; // Exit the loop as the end of the message is reached
-        }
+    // Check if the buffer is almost full and needs space for '\0' and '\r\n'
+    if (pos >= size - 1) {
+      size += BUFFERSIZE; // Increase the buffer size
+      // Try to reallocate the buffer
+      if ((body = realloc(body, size)) == NULL) {
+        perror("realloc"); // Print an error message if realloc fails
+        return NULL;       // Return NULL in case of an error
       }
     }
-    // If the current character is a simple newline '\n'
-	/**
-	 * PS: Auch hier muss eigentlich das nächste Zeichen überprüft werden.
-	 * Was passiert, wenn der Benutzer wirklich \r\n eingibt und nicht nur \n?
-	 * -> Du ersetzt dann \r\n durch \r\r\n, was den String verändert.
-	 */
-    else if (c == '\n') {
-      // Write "\r\n" for SMTP-compliant line breaks
-      if (fputs("\r\n", ws) == EOF) {
-        if (ferror(ws)) { // Check for any write errors
-          perror("fputs 327");
-          return -1;
-        }
-      }
-    }
-    // All other characters are written directly
-    else {
-      if (fputc(c, ws) == EOF) {
-        if (ferror(ws)) { // Check for any write errors
-          perror("fputc 334");
-          return -1;
-        }
-      }
-    }
+
+    // Store the current character in the buffer
+    body[pos++] = (char)ch;
+  }
+  if (pos > 0) {
+    // Null-terminate the string.
+    body[pos] = '\0';
   }
 
   // Check if any errors occurred while reading from stdin
   if (ferror(stdin)) {
-    perror("fgetc");
-    return -1;
+    perror("fgetc"); // Print an error message
+    free(body);      // Free allocated memory
+    return NULL;     // Return NULL in case of an error
   }
 
-  // Flush the output stream to ensure data is sent
-  fflush(ws);
+  return body; // Return the read text
+}
 
-  // Allocate memory for the server response
-  if ((answer = calloc(BUFFERSIZE, sizeof(char))) == NULL) {
+/**
+ * Encodes the given message by escaping periods at the beginning of lines
+ * and converting all line breaks to \r\n.
+ *
+ * @param msg The input message to encode.
+ * @return A pointer to the encoded string or NULL in case of an error.
+ */
+char *encode(char *msg) {
+  int pos = 0;
+  char *encoded;
+  char prev = '\0';
+
+  if (msg == NULL) {
+    fprintf(stderr, "body is NULL");
+    return NULL;
+  }
+  // guess size for a start and allocate it
+  int size = strlen(msg) * 2 + 1;
+  encoded = calloc(size, sizeof(char));
+  if (encoded == NULL) {
     perror("calloc");
-    return -1;
-  }
-  // Read the server’s response
-  if (readP(&answer, rs, &size) == -1) {
-    free(answer);
-    return -1;
+    return NULL;
   }
 
-  // Verify if the server's response contains the "250" status code
-  if (strncmp(answer, "250", 3) != 0) {
-    fprintf(stderr, "wrong code"); // Print an error if the code is not 250
-    free(answer);
-    return -1;
+  for (int i = 0; i < size; i++) {
+    char ch = msg[i];
+
+    if (ch == '.') {
+      encoded[pos++] = ch;
+      encoded[pos++] = ch;
+
+    } else if (ch == '\n') {
+      // if previous char not a \r -> write
+      if (prev != '\r') {
+        encoded[pos++] = '\r';
+      }
+      encoded[pos++] = '\n';
+
+    } else {
+      encoded[pos++] = ch;
+    }
+
+    prev = ch;
   }
 
-  free(answer); // Free the allocated memory for the response
-  return 0;     // Successful completion of the function
+  encoded[pos] = '\0';
+
+  free(msg);
+  return encoded;
 }
 
 /**
@@ -564,6 +502,21 @@ int quit(FILE *ws, FILE *rs) {
   int size = BUFFERSIZE;
   char *last = malloc(BUFFERSIZE);
 
+  if (sendP(ws, "\r\n.\r\n") == -1) {
+    return -1;
+  }
+  fflush(ws);
+
+  if (readP(&last, rs, &size) == -1) {
+    return -1;
+  }
+
+  if (strncmp(last, "250", 3) != 0) {
+    fprintf(stderr, "wrong code");
+    return -1;
+  }
+
+  // send the QUIT message and check it
   if (sendP(ws, "QUIT") == -1) {
     return -1;
   }
@@ -578,7 +531,7 @@ int quit(FILE *ws, FILE *rs) {
   }
 
   if (strncmp(last, "221", 3) != 0) {
-    fprintf(stderr, "wroing code");
+    fprintf(stderr, "wrong code");
     return -1;
   }
 
@@ -597,6 +550,8 @@ int main(int argc, char **argv) {
   FILE *rs;
   FILE *ws;
   int opt;
+  char *body;
+  char *bodySend;
 
   while ((opt = getopt(argc, argv, "s:")) != -1) {
     switch (opt) {
@@ -667,9 +622,19 @@ int main(int argc, char **argv) {
   }
   fflush(stdout);
 
-  if (writeTo(ws, rs) == -1) {
+  if ((body = readBody()) == NULL) {
     exit(EXIT_FAILURE);
   }
+
+  if ((bodySend = encode(body)) == NULL) {
+    exit(EXIT_FAILURE);
+  }
+
+  if (sendP(ws, bodySend) == -1) {
+    exit(EXIT_FAILURE);
+  }
+
+  free(bodySend);
 
   if (quit(ws, rs) == -1) {
     exit(EXIT_FAILURE);
