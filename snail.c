@@ -16,6 +16,13 @@
 
 typedef enum RETURN { CRIT_ERR, ERR, SUCCESS } RETURN;
 
+/**
+ * PS: Hier und an allen Funktionen fehlt das static!!!
+ * Die Funktionen und Variablen sind also nach außen sichtbar.
+ * In SP bekommst du dafür Punkte abgezogen.
+ *
+ * Die Variable hier könntest du außerdem durch ein #define ersetzen.
+ */
 const char *adress = "faui03.cs.fau.de";
 
 void die(const char *message) {
@@ -32,6 +39,14 @@ void die(const char *message) {
  * @return: SUCCESS if successful, otherwise CRIT_ERR on error.
  */
 // @Korrektur: sinnvoll innerhalb der funktion zu allocieren, oder ausserhalb?
+/**
+ * PS: Zu @Korrektur:
+ * Ich finde es meistens sinnvoll, Speicher innerhalb von Funktionen zu allokieren.
+ * Dann ist man flexibel den Speicherbereich auch im Nachhinein zu erweitern. Was dann beachtet werden sollte:
+ * - Der Speicher muss außerhalb der Funktion wieder freigegeben werden.
+ * - Im Fehlerfall, sollte der Speicher in der Funktion selbst wieder freigegeben werden (weiß aber nicht ob wir das in SP machen _müssen_).
+ * In beiden Fällen sollte klar geregelt sein, wie zu verfahren ist. Das einheitlich zu gestalten führt zu besserem Code.
+ */
 RETURN getUserInfo(char *fqdn, char *Uadress, char *name) {
   struct addrinfo hints, *res;
   const char *ADDRESSADD = "@cip.cs.fau.de"; // domain suffix for email
@@ -155,6 +170,10 @@ int getConnSock() {
  * @param size: size of the buffer, updated as needed
  * @return: -1 on error, else position of last char read in the buffer
  */
+ /**
+  * PS: Der Einfachheit halber würde ich empfehlen den Speicher vollständig innerhalb der Funktion zu allokieren und nicht teilweise außerhalb.
+  * Dann hätte dir der Fehler weiter unten in dieser Funktion auch nicht passieren können.
+  */
 // takes allocated buffer, reads in a line from filepointer and returns position
 // of last char: \0
 int readP(char **buffer, FILE *rs, int *size) {
@@ -167,9 +186,39 @@ int readP(char **buffer, FILE *rs, int *size) {
   }
 
   // on error return EOF or if sock is closed
+  /**
+   * PS: ACHTUNG: Dieser Check wird niemals false. Hier passiert etwas sehr gemeines.
+   * Der Zuweisungsoperator in C ist so definiert:
+   * 1. Der R-Wert (Wert rechts des =) wird in falls nötig in den Typ des L-Werts (Variable) umgewandelt. Hier int -> char.
+   * 2. Der R-Wert wird dem L-Wert (der Variablen) zugewiesen.
+   * 3. Der Zuweisungsoperator liefert das Ergebnis des R-Werts (hier (char) fgetc(rs)) zurück.
+   *
+   * Das Problem hier ist, char ein 8 bit Datentyp ist und int meist! ein 32 bit Datentyp.
+   * EOF == -1 entspricht im Zweierkomplement der 32 bit Darstellung 0xffffffff.
+   * Selbst wenn EOF (-1) zurückgegeben wird, wird das durch den Cast zu char zu einem 8 bit Datentyp -> 0xff.
+   *
+   * Der Compiler könnte das bereits vorhersehen.
+   * Aber weil wir hier in C sind macht er das natürlich nicht, sondern setzt alles genauso um wie es dasteht mit allen Konsequenzen.
+   * In Java würde diese Zuweisung übrigens einen expliziten Cast erfordern.
+   */
   while ((c = fgetc(rs)) != EOF) {
     if (pos >= *size - 1) {
       *size += BUFFERSIZE;
+	  /**
+	   * PS: ACHTUNG: Das hier kann zu einem riesen Problem führen!
+	   * Sobald dieses realloc() einmal ausgeführt wurde ist der Speicher von außen über buffer nicht mehr erreichbar.
+	   * Schlimmer noch: Ein Zugriff auf *buffer von außen ist sogar ungültig.
+	   *
+	   * realloc() vergrößert den Speicher und schreibt den neuen pointer zum Stringanfang in line.
+	   * In *buffer steht aber immer noch der Pointer zum alten Stringanfang!
+	   * Dieser wurde gerade durch realloc() aber freigegeben.
+	   *
+	   * Das hier kann nur durch Zufall funktionieren, wenn:
+	   * a) realloc() nie aufgerufen wird
+	   * b) für denn vergrößerten Speicher zufällig der gleiche Speicherort wie für *buffer verwenden wird (nach MAN page explizit möglich).
+	   *
+	   * Insgesamt ist das hier aber undefined behaviour.
+	   */
       if ((line = realloc(line, *size)) == NULL) {
         perror("realloc");
         return -1;
@@ -230,6 +279,10 @@ char **createHeader(char *fqdn, char *sMail, const char *eMail, char *name) {
   }
 
   // generate sizes for malloc
+  /**
+   * PS: Interessant. Wusste nicht, dass mann snprintf() dafür benutzen kann :)
+   * Aber find ich gut.
+   */
   int Helolen = snprintf(NULL, 0, formHELO, fqdn) + 1;
   int FROMlen = snprintf(NULL, 0, formFROM, sMail) + 1;
   int TOlen = snprintf(NULL, 0, formTO, eMail) + 1;
@@ -245,6 +298,10 @@ char **createHeader(char *fqdn, char *sMail, const char *eMail, char *name) {
   info[2] = malloc(TOlen);
   info[3] = strdup(data);
   info[4] = malloc(Headlen);
+  /**
+   * PS: ACHTUNG info[4] wird nicht überprüft!!
+   * da 4 < 4 == false
+   */
   for (int i = 0; i < 4; i++) {
     if (info[i] == NULL) {
       perror("malloc");
@@ -274,6 +331,10 @@ void freeHeader(char **header) {
     return;
   }
 
+  /**
+   * PS: ACHTUNG:
+   * Hier wird auch header[4] nicht freigegeben, da 4 < 4 == false.
+   */
   for (int i = 0; i < 4; i++) {
     free(header[i]);
   }
@@ -376,6 +437,16 @@ int writeTo(FILE *ws, FILE *rs) {
   int size;     // Size of the server's response
 
   // Loop to read and write each character in the message
+  /**
+   * PS: Die Ifs in der Schleife sind sehr undurchsichtig und kompliziert. Hier können leicht Fehler passieren.
+   * Hier passiert sehr viel auf einmal. Das würde ich etwas aufteilen:
+   * 1. Die gesamte Nachricht vom stdin bis EOF einlesen und in einen String speichern (logischerweise dynamisch allokiert).
+   * 2. Eine encoding-Funktion schreiben, die Punkte am Zeilenanfang escaped und sicherstellt, dass die Zeilenumbrüche alle \r\n sind.
+   *    Dafür muss natürlich ein neuer String angelegt werden.
+   * 3. Anschließend kannst du ganz einfach den kodierten String mit fputs() oder ähnlichem versenden.
+   *
+   * Das würde den Code hier etwas entzerren und weniger fehleranfällig machen.
+   */
   while ((c = fgetc(stdin)) != EOF) {
     // Check if the current character is a period ('.')
     if (c == '.') {
@@ -402,6 +473,18 @@ int writeTo(FILE *ws, FILE *rs) {
       }
       // If the next character is '\r' or '\n', it indicates the end of the
       // message
+	  /**
+	   * PS: ACHTUNG: Die Aufgabenstellung sagt nicht, das der Nutzer mit "\r\n.\r\n" die Nachricht beenden soll.
+	   * Der Nutzer soll lediglich Text über die Standardeingabe eingeben und den Text mit CTRL+D (EOF) beenden.
+	   * CTRL+D sorgt dafür, dass im Stream EOF gelesen wird, wodurch das Lesen abbricht.
+	   *
+	   * Selbst wenn der benutzer \r\n.\r\n eingeben würde, müsste das Programm den Punkt durch einen zweiten escapen
+	   * -> \r\n..\r\n
+	   *
+	   * Dieser Check hier ist also falsch.
+	   *
+	   * Ganz davon abgesehen, ist die If-Bedingung hier immer true.
+	   */
       else if (next == '\r' || next == '\n') {
         fprintf(stderr, "test");
         // Write the period and line break to signal the end of the message
@@ -415,6 +498,11 @@ int writeTo(FILE *ws, FILE *rs) {
       }
     }
     // If the current character is a simple newline '\n'
+	/**
+	 * PS: Auch hier muss eigentlich das nächste Zeichen überprüft werden.
+	 * Was passiert, wenn der Benutzer wirklich \r\n eingibt und nicht nur \n?
+	 * -> Du ersetzt dann \r\n durch \r\r\n, was den String verändert.
+	 */
     else if (c == '\n') {
       // Write "\r\n" for SMTP-compliant line breaks
       if (fputs("\r\n", ws) == EOF) {
